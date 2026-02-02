@@ -1,10 +1,9 @@
-from flask import Flask, render_template, request, redirect, url_for, flash, send_file,session
+from flask import Flask, render_template, request, redirect, url_for, flash, send_file, session
 from flask_bcrypt import Bcrypt
 from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
 import psycopg2
 import os
 import io
-import time
 import re
 import pandas as pd
 from hashlib import md5
@@ -39,7 +38,7 @@ REPORT_FILE = "student_scores.csv"
 
 # Ensure the CSV file is properly initialized
 if not os.path.exists(REPORT_FILE):
-    df = pd.DataFrame(columns=["Name", "Class & Section", "Roll No", "Score"])
+    df = pd.DataFrame(columns=["Name", "Class & Section", "Roll No", "Score", "Feedback"])
     df.to_csv(REPORT_FILE, index=False)
 
 # Initialize Flask extensions
@@ -65,14 +64,23 @@ class User(UserMixin):
 
 @login_manager.user_loader
 def load_user(user_id):
+    # Robust check for None or "None" string to prevent database errors
+    if user_id is None or user_id == 'None':
+        return None
+        
     conn = get_db_connection()
     if conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT id, name, email FROM users WHERE id = %s", (user_id,))
-        user = cursor.fetchone()
-        conn.close()
-        if user:
-            return User(id=user[0], name=user[1], email=user[2])
+        try:
+            user_id_int = int(user_id)
+            cursor = conn.cursor()
+            cursor.execute("SELECT id, name, email FROM users WHERE id = %s", (user_id_int,))
+            user = cursor.fetchone()
+            conn.close()
+            if user:
+                return User(id=user[0], name=user[1], email=user[2])
+        except (ValueError, TypeError):
+            conn.close()
+            return None
     return None
 
 # Initialize database
@@ -94,7 +102,8 @@ def init_db():
 
 @app.route("/", methods=["GET"])
 def home():
-    return redirect(url_for("register_login"))
+    # MODIFIED: Redirect directly to the dashboard
+    return redirect(url_for("dashboard"))
 
 @app.route("/register", methods=["GET", "POST"])
 def register_login():
@@ -117,7 +126,6 @@ def register_login():
                     flash("✅ Registration successful! You can now log in.", "success")
                 except Exception as e:
                     print(e)
-                    #flash("❌ Email already exists!", "danger")
                     conn.rollback()
                 finally:
                     cursor.close()
@@ -146,7 +154,7 @@ def register_login():
     return render_template("register.html")
 
 @app.route("/dashboard", methods=["GET", "POST"])
-@login_required
+# MODIFIED: Removed @login_required decorator
 def dashboard():
     if request.method == "POST":
         name = request.form["name"]
@@ -165,24 +173,29 @@ def dashboard():
 
         try:
             images = convert_pdf_to_images(save_path)
-            scores = []
+            
+            # MODIFIED: Capture full feedback
+            full_feedback_list = []
             for image in images:
-                score = evaluate_image(image, user_score)
-                scores.append(score)
+                feedback = evaluate_image(image, user_score)
+                full_feedback_list.append(feedback)
 
-            final_score = ", ".join(scores)
-            save_to_file(name, class_section, roll_no, final_score)
-
-            numerical_score_match = re.search(r'(\d+)(?:/|\s+out\s+of\s+)(\d+)', final_score)
-            numerical_score = numerical_score_match.group(0) if numerical_score_match else "Score not found"
-
-            flash(f"Final Score: {numerical_score}")
+            final_feedback_text = "\n\n---\n\n".join(full_feedback_list)
+            
+            # MODIFIED: Extract score for flash message, save full feedback
+            score_match = re.search(r"SCORE:\s*(\d+\.?\d*\s*/\s*\d+\.?\d*)", final_feedback_text, re.IGNORECASE)
+            display_score = score_match.group(1).strip() if score_match else "Not found"
+            
+            save_to_file(name, class_section, roll_no, display_score, final_feedback_text)
+            
+            flash(f"Evaluation Complete! Final Score: {display_score}")
         except Exception as e:
             flash(f"Error: {str(e)}")
 
         return redirect(url_for("dashboard"))
 
-    return render_template("index.html", name=current_user.name)
+    # MODIFIED: Hardcode a name since no user is logged in
+    return render_template("index.html", name="Guest")
 
 @app.route("/report")
 @login_required
@@ -210,28 +223,45 @@ def convert_image_to_bytes(image):
         return buffer.getvalue()
 
 def evaluate_image(image, user_score):
-    image_hash = generate_image_hash(image)
+    # MODIFIED: Use stable model and detailed prompt, return full text
+    model = genai.GenerativeModel(model_name="gemini-2.5-flash")
     
-    model = genai.GenerativeModel(model_name="gemini-1.5-flash")
-    prompt = f"Extract the text from the image and evaluate it to a score of {user_score}. Give a final score as output."
+    prompt = f"""
+    You are an AI teaching assistant evaluating a handwritten answer. The maximum score is {user_score}.
+    Please provide your evaluation in the following structure:
+    1.  **Score**: Start with the score in the format 'SCORE: X/{user_score}'.
+    2.  **Feedback**: Provide a brief analysis of the student's mistakes and suggest areas for improvement in just 10 words
+    """
 
     try:
         response = model.generate_content([prompt, image])
         if response and hasattr(response, 'text'):
-            response_text = response.text
-            for line in response_text.split('\n'):
-                if 'Score'.lower() in line:
-                    return line.strip()
-        return "Score not found"
+            return response.text # Return the full feedback
+        return "Evaluation not available."
     except Exception as e:
         print(f"Error evaluating image: {e}")
         return "Error evaluating image"
 
-def save_to_file(name, class_section, roll_no, score):
+def save_to_file(name, class_section, roll_no, score, feedback):
+    # MODIFIED: Add "Feedback" column and save feedback data
+    report_columns = ["Name", "Class & Section", "Roll No", "Score", "Feedback"]
+    
+    if not os.path.exists(REPORT_FILE):
+        df = pd.DataFrame(columns=report_columns)
+        df.to_csv(REPORT_FILE, index=False)
+    
     df = pd.read_csv(REPORT_FILE)
-    df = pd.concat([df, pd.DataFrame([{"Name": name, "Class & Section": class_section, "Roll No": roll_no, "Score": score}])], ignore_index=True)
+    new_data = pd.DataFrame([{
+        "Name": name, 
+        "Class & Section": class_section, 
+        "Roll No": roll_no, 
+        "Score": score,
+        "Feedback": feedback
+    }])
+    df = pd.concat([df, new_data], ignore_index=True)
     df.to_csv(REPORT_FILE, index=False)
 
 if __name__ == "__main__":
-    init_db()
+    # You might need to run init_db() once if you start with a fresh database
+    # init_db() 
     app.run(debug=True)
