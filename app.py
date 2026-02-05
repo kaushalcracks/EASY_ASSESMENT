@@ -49,11 +49,16 @@ login_manager.login_view = "register_login"
 # Database connection
 def get_db_connection():
     try:
-        conn = psycopg2.connect(DATABASE_URL)
+        conn = psycopg2.connect(DATABASE_URL, sslmode="require")
+        cur = conn.cursor()
+        cur.execute("SELECT current_database(), current_user;")
+        print("CONNECTED TO:", cur.fetchone())
+        cur.close()
         return conn
     except Exception as e:
         print(f"❌ Database connection failed: {e}")
         return None
+
 
 # User Model
 class User(UserMixin):
@@ -230,7 +235,7 @@ def evaluate_image(image, user_score):
     You are an AI teaching assistant evaluating a handwritten answer. The maximum score is {user_score}.
     Please provide your evaluation in the following structure:
     1.  **Score**: Start with the score in the format 'SCORE: X/{user_score}'.
-    2.  **Feedback**: Provide a brief analysis of the student's mistakes and suggest areas for improvement in just 10 words
+    2.  **Feedback**: Provide analysis of the student's mistakes and suggest areas for improvement in detail.
     """
 
     try:
@@ -256,7 +261,7 @@ def save_to_file(name, class_section, roll_no, score, feedback):
         "Class & Section": class_section, 
         "Roll No": roll_no, 
         "Score": score,
-        "Feedback": feedback
+        "Feedback": feedback.replace("\n", " | ")
     }])
     df = pd.concat([df, new_data], ignore_index=True)
     df.to_csv(REPORT_FILE, index=False)
