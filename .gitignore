@@ -1,0 +1,17 @@
+# Environment variables
+.env
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Flask session files
+flask_sessions/
+
+# Uploads & reports
+static/uploads/
+student_scores.csv
+
+# OS files
+.DS_Store
+Thumbs.db
